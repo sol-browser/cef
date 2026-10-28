@@ -16,6 +16,8 @@
 #include "components/find_in_page/find_tab_helper.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "mojo/public/cpp/bindings/receiver.h"
+#include "services/media_session/public/mojom/media_session.mojom.h"
 
 class CefBrowser;
 class CefBrowserInfo;
@@ -71,6 +73,7 @@ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
 
   explicit CefBrowserContentsDelegate(
       scoped_refptr<CefBrowserInfo> browser_info);
+  // Out of line: owns MediaSessionWatch (defined in the .cc).
   ~CefBrowserContentsDelegate() override;
 
   CefBrowserContentsDelegate(const CefBrowserContentsDelegate&) = delete;
@@ -152,6 +155,7 @@ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
                      const GURL& validated_url) override;
   void TitleWasSet(content::NavigationEntry* entry) override;
   void OnAudioStateChanged(bool audible) override;
+  void MediaSessionCreated(content::MediaSession* media_session) override;
   void DidUpdateFaviconURL(
       content::RenderFrameHost* render_frame_host,
       const std::vector<blink::mojom::FaviconURLPtr>& candidates,
@@ -225,6 +229,13 @@ class CefBrowserContentsDelegate : public content::WebContentsDelegate,
   base::ScopedObservation<find_in_page::FindTabHelper,
                           find_in_page::FindResultObserver>
       find_observation_{this};
+
+  // Red: the page's Media Session, reported through
+  // CefDisplayHandler::OnMediaSessionChanged.
+  class MediaSessionWatch;
+  std::unique_ptr<MediaSessionWatch> media_session_watch_;
+  void WatchMediaSession(content::MediaSession* media_session);
+  void ReportMediaSession(CefRefPtr<CefDictionaryValue> info);
 };
 
 #endif  // CEF_LIBCEF_BROWSER_BROWSER_CONTENTS_DELEGATE_H_
