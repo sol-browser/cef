@@ -1456,9 +1456,66 @@ DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(ui::LayerSolidColor, kContentVeilKey)
 DEFINE_UI_CLASS_PROPERTY_TYPE(ui::Layer*)
 DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(ui::Layer, kContentContainerKey)
 
+DEFINE_UI_CLASS_PROPERTY_KEY(int, kContentCornerRadiusKey, 0)
+
 namespace {
-// Keep the rounded clip throughout the threaded return animation. Clearing it
-// at request time exposes square corners while the container is still moving.
+// Keep the NativeViewHost layer untransformed. Only its compositor-only
+// wrapper owns the document clip, including ordinary resting page layout.
+views::NativeViewHost* EnsureContentContainer(content::WebContents* web_contents,
+                                            aura::Window* window) {
+  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
+          "red-translucent-child-windows")) {
+    return nullptr;
+  }
+  // Transform the parent containing the document, rather than the renderer
+  // surface inside a stationary view. The clip and veil live in this same
+  // subtree, including when a renderer view is replaced on navigation.
+  ContentsWebView* page_container = nullptr;
+  if (auto* widget = views::Widget::GetTopLevelWidgetForNativeView(window)) {
+    if (auto* browser_view = BrowserView::GetBrowserViewForNativeWindow(
+            widget->GetNativeWindow())) {
+      for (auto* contents : browser_view->GetAllVisibleContentsWebViews()) {
+        if (contents->web_contents() == web_contents) {
+          page_container = contents;
+          break;
+        }
+      }
+    }
+  }
+  if (!page_container || !page_container->layer()) {
+    return nullptr;
+  }
+  auto* container_host = page_container->holder();
+  if (!container_host || !container_host->layer()) {
+    return nullptr;
+  }
+  page_container->SetContainerBackgroundVisible(false);
+  const auto size = container_host->size();
+  // NativeViewHost::Layout converts its View bounds to widget coordinates,
+  // including the View layer's transform. Scaling that layer would resize
+  // and offset the document again on the next layout. Keep the View layer
+  // untransformed and animate a compositor-only child containing the native
+  // document, its rounded clip and veil.
+  auto* wrapper = window->GetProperty(kContentContainerKey);
+  if (!wrapper) {
+    auto owned = ui::Layer::Create(ui::LAYER_NOT_DRAWN);
+    owned->SetName("RedContentContainer");
+    wrapper = owned.get();
+    window->SetProperty(kContentContainerKey, std::move(owned));
+  }
+  if (wrapper->parent() != container_host->layer()) {
+    container_host->layer()->Add(wrapper);
+  }
+  // NativeViewHost can attach a native view again after navigation/reparent.
+  if (window->layer()->parent() != wrapper) {
+    wrapper->Add(window->layer());
+  }
+  wrapper->SetBounds(gfx::Rect(size));
+  return container_host;
+}
+
+// Keep the rounded clip throughout the threaded return animation. Restore
+// the current resting radius only after the final moving frame is presented.
 void ClearRestingContainerCorners(std::unique_ptr<views::ViewTracker> tracker) {
   auto* host = static_cast<views::NativeViewHost*>(tracker->view());
   auto* window = host ? host->native_view() : nullptr;
@@ -1471,7 +1528,8 @@ void ClearRestingContainerCorners(std::unique_ptr<views::ViewTracker> tracker) {
         base::BindOnce(&ClearRestingContainerCorners, std::move(tracker)), 32);
     return;
   }
-  layer->SetRoundedCornerRadius(gfx::RoundedCornersF());
+  layer->SetRoundedCornerRadius(gfx::RoundedCornersF(
+      static_cast<float>(window->GetProperty(kContentCornerRadiusKey))));
 }
 }  // namespace
 
@@ -1486,6 +1544,33 @@ void CefBrowserHostBase::SetContentContainerTransform(double scale,
                                                      int duration_ms,
                                                      cef_color_t veil_color) {
   ApplyContentTransform(scale, dim, duration_ms, veil_color, true);
+}
+
+void CefBrowserHostBase::SetContentContainerCornerRadius(int radius) {
+  if (!CEF_CURRENTLY_ON_UIT()) {
+    CEF_POST_TASK(CEF_UIT,
+        base::BindOnce(&CefBrowserHostBase::SetContentContainerCornerRadius,
+                       this, radius));
+    return;
+  }
+  auto* web_contents = GetWebContents();
+  if (!web_contents || IsWindowless()) {
+    return;
+  }
+  auto* window = web_contents->GetNativeView();
+  if (!window || !window->layer() ||
+      !EnsureContentContainer(web_contents, window)) {
+    return;
+  }
+  radius = std::clamp(radius, 0, 64);
+  window->SetProperty(kContentCornerRadiusKey, radius);
+  auto* layer = window->GetProperty(kContentContainerKey);
+  const bool moving = !layer->transform().IsIdentity() ||
+                      layer->GetAnimator()->is_animating();
+  layer->SetMasksToBounds(true);
+  layer->SetIsFastRoundedCorner(true);
+  layer->SetRoundedCornerRadius(gfx::RoundedCornersF(
+      static_cast<float>(moving ? std::max(6, radius) : radius)));
 }
 
 void CefBrowserHostBase::ApplyContentTransform(double scale,
@@ -1517,55 +1602,12 @@ void CefBrowserHostBase::ApplyContentTransform(double scale,
   gfx::Size size = window->bounds().size();
   views::NativeViewHost* container_host = nullptr;
   if (container) {
-    if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
-            "red-translucent-child-windows")) {
+    container_host = EnsureContentContainer(web_contents, window);
+    if (!container_host) {
       return;
     }
-    // Transform the parent containing the document, rather than the renderer
-    // surface inside a stationary view. The clip and veil live in this same
-    // subtree, including when a renderer view is replaced on navigation.
-    ContentsWebView* page_container = nullptr;
-    if (auto* widget = views::Widget::GetTopLevelWidgetForNativeView(window)) {
-      if (auto* browser_view = BrowserView::GetBrowserViewForNativeWindow(
-              widget->GetNativeWindow())) {
-        for (auto* contents : browser_view->GetAllVisibleContentsWebViews()) {
-          if (contents->web_contents() == web_contents) {
-            page_container = contents;
-            break;
-          }
-        }
-      }
-    }
-    if (!page_container || !page_container->layer()) {
-      return;
-    }
-    container_host = page_container->holder();
-    if (!container_host || !container_host->layer()) {
-      return;
-    }
-    page_container->SetContainerBackgroundVisible(false);
     size = container_host->size();
-    // NativeViewHost::Layout converts its View bounds to widget coordinates,
-    // including the View layer's transform. Scaling that layer would resize
-    // and offset the document again on the next layout. Keep the View layer
-    // untransformed and animate a compositor-only child containing the native
-    // document, its rounded clip and veil.
-    auto* wrapper = window->GetProperty(kContentContainerKey);
-    if (!wrapper) {
-      auto owned = ui::Layer::Create(ui::LAYER_NOT_DRAWN);
-      owned->SetName("RedContentContainer");
-      wrapper = owned.get();
-      window->SetProperty(kContentContainerKey, std::move(owned));
-    }
-    if (wrapper->parent() != container_host->layer()) {
-      container_host->layer()->Add(wrapper);
-    }
-    // NativeViewHost can attach a native view again after navigation/reparent.
-    if (window->layer()->parent() != wrapper) {
-      wrapper->Add(window->layer());
-    }
-    wrapper->SetBounds(gfx::Rect(size));
-    layer = wrapper;
+    layer = window->GetProperty(kContentContainerKey);
   }
   // The veil is a child of the content layer, so it scales with the page; it
   // is restacked on top (a new renderer view is added above it).
@@ -1596,7 +1638,11 @@ void CefBrowserHostBase::ApplyContentTransform(double scale,
     layer->SetIsFastRoundedCorner(true);
     // Establish the shape before the first moving frame. Rounded-corner
     // interpolation runs on the UI thread, unlike the threaded transform.
-    layer->SetRoundedCornerRadius(gfx::RoundedCornersF(6.f));
+    const int resting_radius = window->GetProperty(kContentCornerRadiusKey);
+    const bool moving = scale != 1 || !layer->transform().IsIdentity() ||
+                        layer->GetAnimator()->is_animating();
+    layer->SetRoundedCornerRadius(gfx::RoundedCornersF(
+        static_cast<float>(moving ? std::max(6, resting_radius) : resting_radius)));
   }
   std::optional<ui::ScopedLayerAnimationSettings> animation;
   if (duration_ms > 0) {

@@ -1087,6 +1087,18 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
                                             double dim,
                                             int duration_ms,
                                             cef_color_t veil_color) = 0;
+
+  ///
+  /// Sets the persistent page-container corner radius in DIP, clamped to
+  /// [0, 64]. Zero disables the resting clip (for example in fullscreen).
+  /// Requires red-translucent-child-windows and a windowed Chrome browser.
+  /// Reapply after layout/navigation to refresh the compositor-only wrapper;
+  /// this never changes the document viewport or interrupts a transform.
+  /// A return animation restores the most recently requested resting radius.
+  /// Calls from other threads are dispatched to the UI thread.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual void SetContentContainerCornerRadius(int radius) = 0;
 #endif
 
   ///
