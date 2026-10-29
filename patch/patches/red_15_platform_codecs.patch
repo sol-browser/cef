@@ -1,0 +1,136 @@
+--- media/media_options.gni
++++ media/media_options.gni
+@@ -31,6 +31,9 @@
+   # based decoding, demuxing, and sometimes optimized FFTs. If disabled,
+   # implementors must provide their own demuxers and decoders.
+   media_use_ffmpeg = true
++
++  # Red Windows experiment: OS AAC and hardware-only H.264.
++  red_platform_codecs = false
+ 
+   # Enable usage of Symphonia within the media library. Used experimentally
+   # for software decoding.
+--- media/BUILD.gn
++++ media/BUILD.gn
+@@ -68,6 +68,7 @@
+     "USE_CHROMEOS_PROTECTED_MEDIA=$use_chromeos_protected_media",
+     "USE_CRAS=$use_cras",
+     "USE_PROPRIETARY_CODECS=$proprietary_codecs",
++    "RED_PLATFORM_CODECS=$red_platform_codecs",
+     "ENABLE_GPU_CHANNEL_MEDIA_CAPTURE=$enable_gpu_channel_media_capture",
+     "USE_OPENSLES=$media_use_opensles",
+   ]
+@@ -89,9 +90,14 @@
+ 
+ if (proprietary_codecs && media_use_ffmpeg) {
+   assert(
+-      ffmpeg_branding != "Chromium",
++      ffmpeg_branding != "Chromium" || red_platform_codecs,
+       "proprietary codecs and ffmpeg_branding set to Chromium are incompatible")
+ }
++
++assert(!red_platform_codecs ||
++       (is_win && target_cpu == "x64" && proprietary_codecs &&
++        ffmpeg_branding == "Chromium"),
++       "Red platform codecs require Windows x64 and Chromium FFmpeg")
+ 
+ # Common configuration for targets in the media directory; these must not be
+ # exported since things like USE_NEON have different meanings elsewhere in the
+--- media/filters/win/media_foundation_audio_decoder.cc
++++ media/filters/win/media_foundation_audio_decoder.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "media/filters/win/media_foundation_audio_decoder.h"
++#include "media/media_buildflags.h"
+ 
+ #include <mfapi.h>
+ #include <mferror.h>
+@@ -101,6 +102,10 @@
+ #endif
+ #if BUILDFLAG(USE_PROPRIETARY_CODECS)
+     case AudioCodec::kAAC:
++      // Ordinary AAC uses the existing RAW AAC + ASC path.
++      if (BUILDFLAG(RED_PLATFORM_CODECS) && config.profile() != AudioCodecProfile::kXHE_AAC) {
++        return MFT_REGISTER_TYPE_INFO{MFMediaType_Audio, MFAudioFormat_AAC};
++      }
+       if (config.profile() == AudioCodecProfile::kXHE_AAC &&
+           base::win::GetVersion() >= base::win::Version::WIN11_22H2) {
+         return MFT_REGISTER_TYPE_INFO{MFMediaType_Audio, MFAudioFormat_AAC};
+--- media/ffmpeg/ffmpeg_common.cc
++++ media/ffmpeg/ffmpeg_common.cc
+@@ -378,6 +378,13 @@
+   SampleFormat sample_format = AVSampleFormatToSampleFormat(
+       codec_context->sample_fmt, codec_context->codec_id);
+ 
++  // Without a bundled AAC decoder FFmpeg cannot infer a decoded sample
++  // format. As in the MP4 stream parser, use S16 as the nominal format
++  // of compressed AAC; the platform decoder negotiates actual PCM.
++  if (codec == AudioCodec::kAAC && sample_format == kUnknownSampleFormat) {
++    sample_format = kSampleFormatS16;
++  }
++
+   ChannelLayout channel_layout =
+       ChannelLayoutToChromeChannelLayout(codec_context->ch_layout);
+ 
+@@ -482,8 +489,10 @@
+ 
+   // Verify that AudioConfig.bytes_per_channel was calculated correctly for
+   // codecs that have |sample_fmt| set by FFmpeg.
+-  DCHECK_EQ(av_get_bytes_per_sample(codec_context->sample_fmt),
+-            config->bytes_per_channel());
++  if (codec != AudioCodec::kAAC || codec_context->sample_fmt != AV_SAMPLE_FMT_NONE) {
++    DCHECK_EQ(av_get_bytes_per_sample(codec_context->sample_fmt),
++              config->bytes_per_channel());
++  }
+   return true;
+ }
+ 
+--- media/formats/mp4/mp4_stream_parser.cc
++++ media/formats/mp4/mp4_stream_parser.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "media/formats/mp4/mp4_stream_parser.h"
++#include "media/media_buildflags.h"
+ 
+ #include <stddef.h>
+ 
+@@ -86,9 +87,15 @@
+ 
+   // Append an ADTS header to every audio sample if possible.
+   size_t adts_header_size = 0;
++  // Red Windows platform-only candidate: Media Foundation consumes RAW
++  // AAC + AudioSpecificConfig, just like the ordinary MP4/WebCodecs path.
++  // Preserve the ADTS preparation for other platforms.
++#if !BUILDFLAG(RED_PLATFORM_CODECS)
+   if (aac_config.fits_in_adts()) {
+     output_buffer = aac_config.CreateAdtsFromEsds(frame_buf, &adts_header_size);
+-  } else {
++  } else
++#endif
++  {
+     output_buffer = base::HeapArray<uint8_t>::CopiedFrom(frame_buf);
+   }
+ 
+--- media/mojo/services/gpu_mojo_media_client_win.cc
++++ media/mojo/services/gpu_mojo_media_client_win.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "media/mojo/services/gpu_mojo_media_client.h"
++#include "media/media_buildflags.h"
+ 
+ #include <d3d11.h>
+ #include <d3d12.h>
+@@ -101,6 +102,10 @@
+     }
+ #endif  // BUILDFLAG (ENABLE_PLATFORM_AC3_EAC3_AUDIO)
+ 
++    if (BUILDFLAG(RED_PLATFORM_CODECS) && InitializeMediaFoundation()) {
++      // AAC-LC / HE-AAC have kUnknown profile in Chromium.
++      audio_configs.emplace_back(AudioCodec::kAAC, AudioCodecProfile::kUnknown);
++    }
+     if (base::win::GetVersion() >= base::win::Version::WIN11_22H2 &&
+         InitializeMediaFoundation()) {
+       audio_configs.emplace_back(AudioCodec::kAAC, AudioCodecProfile::kXHE_AAC);
