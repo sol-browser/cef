@@ -289,6 +289,7 @@ class CefBrowserHostBase : public CefBrowserHost,
                                     double dim,
                                     int duration_ms,
                                     cef_color_t veil_color) override;
+  void SetContentContainerCornerRadius(int radius) override;
   void ApplyContentTransform(double scale,
                              double dim,
                              int duration_ms,
