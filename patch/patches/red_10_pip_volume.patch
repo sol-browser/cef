@@ -1,16 +1,36 @@
 diff --git chrome/browser/ui/views/overlay/video_overlay_window_views.cc chrome/browser/ui/views/overlay/video_overlay_window_views.cc
-index 0afdeb691c..b93951e82a 100644
+index 0afdeb691c3eebf4f9acf92214e4d9ed25ae6314..c68f71eb1025152a6e6f7f830f2d3f53ee2a6d90 100644
 --- chrome/browser/ui/views/overlay/video_overlay_window_views.cc
 +++ chrome/browser/ui/views/overlay/video_overlay_window_views.cc
-@@ -43,6 +43,7 @@
+@@ -4,7 +4,9 @@
+ 
+ #include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
+ 
++#include <algorithm>
+ #include <memory>
++#include <optional>
+ #include <string>
+ 
+ #include "base/check.h"
+@@ -14,6 +16,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/notreached.h"
+ #include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/time/time.h"
+ #include "base/timer/timer.h"
+@@ -43,6 +46,9 @@
  #include "chrome/browser/ui/views/overlay/toggle_camera_button.h"
  #include "chrome/browser/ui/views/overlay/toggle_microphone_button.h"
  #include "chrome/browser/ui/views/overlay/toggle_mute_button.h"
 +#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/accessibility/ax_action_data.h"
++#include "ui/accessibility/ax_enums.mojom.h"
  #include "chrome/browser/ui/views/picture_in_picture/picture_in_picture_tucker.h"
  #include "chrome/grit/generated_resources.h"
  #include "components/global_media_controls/public/format_duration.h"
-@@ -115,6 +116,8 @@ constexpr gfx::Size kOverlayViewPadding(64, 46);
+@@ -115,6 +121,8 @@ constexpr gfx::Size kOverlayViewPadding(64, 46);
  
  // Size for action buttons.
  constexpr gfx::Size kActionButtonSize(28, 28);
@@ -19,7 +39,57 @@ index 0afdeb691c..b93951e82a 100644
  
  // The amount of time the seek buttons next to the play button seek.
  constexpr base::TimeDelta kSeekTime = base::Seconds(10);
-@@ -1026,6 +1029,8 @@ bool VideoOverlayWindowViews::ControlsHitTestContainsPoint(
+@@ -205,6 +213,49 @@ class GradientBackground : public views::Background {
+   const SkColor4f bottom_color_;
+ };
+ 
++// Red: the volume slider beside the mute button. An accessible "set value"
++// (e.g. UI Automation RangeValue.SetValue) is handled like a user change.
++class VolumeSlider : public views::Slider {
++  METADATA_HEADER(VolumeSlider, views::Slider)
++
++ public:
++  VolumeSlider(views::SliderListener* listener,
++               base::RepeatingCallback<void(float)> on_set_by_user)
++      : views::Slider(listener), on_set_by_user_(std::move(on_set_by_user)) {
++    GetViewAccessibility().AddAction(ax::mojom::Action::kSetValue);
++  }
++
++  // views::View:
++  bool HandleAccessibleAction(const ui::AXActionData& action_data) override {
++    // views::Slider's own handler is private; it steps by 0.1 like this one.
++    double value = GetValue();
++    switch (action_data.action) {
++      case ax::mojom::Action::kSetValue:
++        if (!base::StringToDouble(action_data.value, &value)) {
++          return false;
++        }
++        break;
++      case ax::mojom::Action::kIncrement:
++        value += 0.1;
++        break;
++      case ax::mojom::Action::kDecrement:
++        value -= 0.1;
++        break;
++      default:
++        return views::View::HandleAccessibleAction(action_data);
++    }
++    SetValue(static_cast<float>(std::clamp(value, 0.0, 1.0)));
++    on_set_by_user_.Run(GetValue());
++    return true;
++  }
++
++ private:
++  base::RepeatingCallback<void(float)> on_set_by_user_;
++};
++
++BEGIN_METADATA(VolumeSlider)
++END_METADATA
++
+ }  // namespace
+ 
+ // OverlayWindow implementation of FrameView.
+@@ -1026,6 +1077,8 @@ bool VideoOverlayWindowViews::ControlsHitTestContainsPoint(
        GetToggleCameraButtonBounds().Contains(point) ||
        GetHangUpButtonBounds().Contains(point) ||
        GetToggleMuteButtonBounds().Contains(point) ||
@@ -28,14 +98,17 @@ index 0afdeb691c..b93951e82a 100644
        GetProgressViewBounds().Contains(point) ||
        GetLiveCaptionButtonBounds().Contains(point) ||
        GetLiveCaptionDialogBounds().Contains(point)) {
-@@ -1279,6 +1284,16 @@ void VideoOverlayWindowViews::SetUpViews() {
+@@ -1279,6 +1332,19 @@ void VideoOverlayWindowViews::SetUpViews() {
          base::Unretained(this)));
      toggle_mute_button->SetSize(kActionButtonSize);
    }
 +  // Red: a volume slider beside the mute button.
 +  std::unique_ptr<views::Slider> volume_slider;
 +  if (toggle_mute_button) {
-+    volume_slider = std::make_unique<views::Slider>(this);
++    volume_slider = std::make_unique<VolumeSlider>(
++        this,
++        base::BindRepeating(&VideoOverlayWindowViews::OnVolumeSetByUser,
++                            base::Unretained(this)));
 +    volume_slider->SetRenderingStyle(
 +        views::Slider::RenderingStyle::kMinimalStyle);
 +    volume_slider->SetValue(1.0f);
@@ -45,7 +118,7 @@ index 0afdeb691c..b93951e82a 100644
  
  #if BUILDFLAG(IS_CHROMEOS)
    auto resize_handle_view =
-@@ -1397,6 +1412,10 @@ void VideoOverlayWindowViews::SetUpViews() {
+@@ -1397,6 +1463,10 @@ void VideoOverlayWindowViews::SetUpViews() {
      toggle_mute_button_ = playback_controls_container_view_->AddChildView(
          std::move(toggle_mute_button));
    }
@@ -56,7 +129,7 @@ index 0afdeb691c..b93951e82a 100644
  
  #if BUILDFLAG(IS_CHROMEOS)
    resize_handle_view_ =
-@@ -1687,6 +1706,11 @@ void VideoOverlayWindowViews::OnUpdateControlsBounds() {
+@@ -1687,6 +1757,11 @@ void VideoOverlayWindowViews::OnUpdateControlsBounds() {
      toggle_mute_button_->SetPosition(
          {live_caption_button_bounds.x() - kActionButtonSize.width() - 4,
           live_caption_button_bounds.y()});
@@ -68,7 +141,20 @@ index 0afdeb691c..b93951e82a 100644
    }
  
    live_caption_dialog_->SetPosition(
-@@ -1908,6 +1932,21 @@ void VideoOverlayWindowViews::SetCameraState(bool turned_on) {
+@@ -1786,6 +1861,12 @@ void VideoOverlayWindowViews::ShowInactive() {
+   if (toggle_mute_button_) {
+     toggle_mute_button_->SetMutedState(controller_->GetMuteStatus());
+   }
++  // Red: start the volume slider at the player's own volume.
++  if (volume_slider_) {
++    if (const std::optional<double> volume = controller_->GetVolume()) {
++      SetMediaVolume(*volume);
++    }
++  }
+ 
+   // If this is not the first time the window is shown, this will be a no-op.
+   has_been_shown_ = true;
+@@ -1908,6 +1989,33 @@ void VideoOverlayWindowViews::SetCameraState(bool turned_on) {
    toggle_camera_button_->SetCameraState(turned_on);
  }
  
@@ -80,6 +166,10 @@ index 0afdeb691c..b93951e82a 100644
 +  if (sender != volume_slider_ || reason != views::SliderChangeReason::kByUser) {
 +    return;
 +  }
++  OnVolumeSetByUser(value);
++}
++
++void VideoOverlayWindowViews::OnVolumeSetByUser(float value) {
 +  controller_->SetVolume(value);
 +  // Raising the volume of muted media unmutes it, as in Chrome's media controls.
 +  if (value > 0 && controller_->GetMuteStatus()) {
@@ -87,11 +177,19 @@ index 0afdeb691c..b93951e82a 100644
 +  }
 +}
 +
++void VideoOverlayWindowViews::SetMediaVolume(double volume) {
++  // Red: kByApi changes are ignored by SliderValueChanged, so this does not
++  // echo the volume back to the player.
++  if (volume_slider_) {
++    volume_slider_->SetValue(static_cast<float>(std::clamp(volume, 0.0, 1.0)));
++  }
++}
++
  void VideoOverlayWindowViews::SetMediaMuted(bool muted) {
    if (toggle_mute_button_) {
      toggle_mute_button_->SetMutedState(muted);
 diff --git chrome/browser/ui/views/overlay/video_overlay_window_views.h chrome/browser/ui/views/overlay/video_overlay_window_views.h
-index 222a5167b5..239ff305ca 100644
+index 222a5167b5e719403268e672372acd809a043263..894e73922d69e521b182f193181a3e6bce30a8b5 100644
 --- chrome/browser/ui/views/overlay/video_overlay_window_views.h
 +++ chrome/browser/ui/views/overlay/video_overlay_window_views.h
 @@ -20,6 +20,7 @@
@@ -102,7 +200,7 @@ index 222a5167b5..239ff305ca 100644
  #include "ui/views/view_observer.h"
  #include "ui/views/widget/widget.h"
  
-@@ -60,8 +61,15 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+@@ -60,8 +61,17 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
                                  public display::DisplayObserver,
                                  public views::ViewObserver,
                                  public PictureInPictureWindow,
@@ -115,11 +213,21 @@ index 222a5167b5..239ff305ca 100644
 +                          float value,
 +                          float old_value,
 +                          views::SliderChangeReason reason) override;
++  // Red: the user set the volume slider (pointer, keyboard or accessibility).
++  void OnVolumeSetByUser(float value);
 +
    using GetOverlayViewCb =
        base::RepeatingCallback<std::unique_ptr<AutoPipSettingOverlayView>()>;
  
-@@ -495,6 +503,7 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+@@ -98,6 +108,7 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+   void SetMicrophoneMuted(bool muted) override;
+   void SetCameraState(bool turned_on) override;
+   void SetMediaMuted(bool muted) override;
++  void SetMediaVolume(double volume) override;
+   void SetToggleMicrophoneButtonVisibility(bool is_visible) override;
+   void SetToggleCameraButtonVisibility(bool is_visible) override;
+   void SetHangUpButtonVisibility(bool is_visible) override;
+@@ -495,6 +506,7 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
    raw_ptr<ToggleCameraButton> toggle_camera_button_ = nullptr;
    raw_ptr<HangUpButton> hang_up_button_ = nullptr;
    raw_ptr<ToggleMuteButton> toggle_mute_button_ = nullptr;
@@ -127,8 +235,134 @@ index 222a5167b5..239ff305ca 100644
    raw_ptr<global_media_controls::MediaProgressView> progress_view_ = nullptr;
    raw_ptr<views::Label> timestamp_ = nullptr;
    raw_ptr<views::Label> live_status_ = nullptr;
+diff --git content/browser/media/media_web_contents_observer.cc content/browser/media/media_web_contents_observer.cc
+index e45e369bd5c65fbc13ba16a51cfe7881c71f8ceb..6045c6fa8ab14934140d495bbcab1de6c0b786af 100644
+--- content/browser/media/media_web_contents_observer.cc
++++ content/browser/media/media_web_contents_observer.cc
+@@ -18,6 +18,7 @@
+ #include "content/browser/media/audible_metrics.h"
+ #include "content/browser/media/media_devices_util.h"
+ #include "content/browser/media/media_web_contents_observer.h"
++#include "content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h"
+ #include "content/browser/renderer_host/media/media_stream_manager.h"
+ #include "content/browser/renderer_host/media/preferred_audio_output_device_manager.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+@@ -379,6 +380,15 @@ bool MediaWebContentsObserver::IsPlayerActive(
+   return false;
+ }
+ 
++std::optional<double> MediaWebContentsObserver::GetPlayerVolume(
++    const MediaPlayerId& player_id) const {
++  auto it = media_player_observer_hosts_.find(player_id);
++  if (it == media_player_observer_hosts_.end()) {
++    return std::nullopt;
++  }
++  return it->second->volume();
++}
++
+ // MediaWebContentsObserver::MediaPlayerHostImpl
+ 
+ MediaWebContentsObserver::MediaPlayerHostImpl::MediaPlayerHostImpl(
+@@ -429,6 +439,18 @@ void MediaWebContentsObserver::MediaPlayerObserverHostImpl::
+       base::Unretained(media_web_contents_observer_), media_player_id_));
+ }
+ 
++void MediaWebContentsObserver::MediaPlayerObserverHostImpl::OnVolumeChanged(
++    double volume) {
++  // Red: remember the player's own volume and update its Picture-in-Picture
++  // window, if any.
++  volume_ = std::clamp(volume, 0.0, 1.0);
++  if (auto* pip_controller =
++          VideoPictureInPictureWindowControllerImpl::FromWebContents(
++              media_web_contents_observer_->web_contents_impl())) {
++    pip_controller->MediaVolumeChanged(media_player_id_, *volume_);
++  }
++}
++
+ void MediaWebContentsObserver::MediaPlayerObserverHostImpl::
+     OnMutedStatusChanged(bool muted) {
+   media_web_contents_observer_->web_contents_impl()->MediaMutedStatusChanged(
+diff --git content/browser/media/media_web_contents_observer.h content/browser/media/media_web_contents_observer.h
+index e6395d6e82b9cbb3f4067a81a6a3726be819e449..9b46f5eac74524b0ad516fed66c3a9883fb093c2 100644
+--- content/browser/media/media_web_contents_observer.h
++++ content/browser/media/media_web_contents_observer.h
+@@ -155,6 +155,10 @@ class CONTENT_EXPORT MediaWebContentsObserver
+   // Returns whether or not the given player id is active.
+   bool IsPlayerActive(const MediaPlayerId& player_id) const;
+ 
++  // Red: returns the media element's own volume (0..1) last reported by the
++  // player, if any.
++  std::optional<double> GetPlayerVolume(const MediaPlayerId& player_id) const;
++
+   bool has_audio_wake_lock_for_testing() const {
+     return has_audio_wake_lock_for_testing_;
+   }
+@@ -241,6 +245,7 @@ class CONTENT_EXPORT MediaWebContentsObserver
+     void OnMediaPlaying() override;
+     void OnMediaPaused(bool stream_ended) override;
+     void OnMutedStatusChanged(bool muted) override;
++    void OnVolumeChanged(double volume) override;
+     void OnMediaMetadataChanged(
+         bool has_audio,
+         bool has_video,
+@@ -261,6 +266,9 @@ class CONTENT_EXPORT MediaWebContentsObserver
+     void NotifyAudioStreamMonitorIfNeeded();
+     void OnVideoFrameAvailabilityChanged(bool available) override;
+ 
++    // Red: see GetPlayerVolume.
++    std::optional<double> volume() const { return volume_; }
++
+    private:
+     PlayerInfo* GetPlayerInfo();
+ 
+@@ -278,6 +286,9 @@ class CONTENT_EXPORT MediaWebContentsObserver
+ 
+     // Helps monitor audio stream when not using AudioService.
+     bool uses_audio_service_ = true;
++
++    // Red: the media element's own volume (see OnVolumeChanged).
++    std::optional<double> volume_;
+     std::unique_ptr<AudioStreamMonitor::AudibleClientRegistration>
+         audio_client_registration_;
+ 
+diff --git content/browser/media/media_web_contents_observer_unittest.cc content/browser/media/media_web_contents_observer_unittest.cc
+index 52376541f89665237671781cf4e4b68309ee3a43..44845727c6720d6aa4dda49a707ed1305cc64ba2 100644
+--- content/browser/media/media_web_contents_observer_unittest.cc
++++ content/browser/media/media_web_contents_observer_unittest.cc
+@@ -36,6 +36,7 @@ class TestMediaPlayer final : public media::mojom::MediaPlayer {
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestSetVolume(double volume) override {}
+   void SetVolumeMultiplier(double multiplier) override {}
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
+diff --git content/browser/media/session/media_session_controller_unittest.cc content/browser/media/session/media_session_controller_unittest.cc
+index efa0ef179b5fa7d3ac1455d3fb65b47954e18f7b..d77c6eee89749eae9978a66e5937b37588c16343 100644
+--- content/browser/media/session/media_session_controller_unittest.cc
++++ content/browser/media/session/media_session_controller_unittest.cc
+@@ -146,6 +146,7 @@ class TestMediaPlayer : public media::mojom::MediaPlayer {
+       const std::optional<gfx::Size>& min_size) override {}
+ 
+   void RequestMute(bool mute) override {}
++  void RequestSetVolume(double volume) override {}
+ 
+   void SetVolumeMultiplier(double multiplier) override {
+     received_volume_multiplier_ = multiplier;
+diff --git content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc
+index 1a008f2a1d678e648c73177ef020148a8ddeef7b..8144c38c8604087e0cf70cb0a5b7e08d7d1d1587 100644
+--- content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc
++++ content/browser/picture_in_picture/picture_in_picture_service_impl_unittest.cc
+@@ -184,6 +184,7 @@ class PictureInPictureMediaPlayerReceiver : public media::mojom::MediaPlayer {
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestSetVolume(double volume) override {}
+   void SetVolumeMultiplier(double multiplier) override {}
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
 diff --git content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
-index 60cf783dc7..7d32bb1d6b 100644
+index 60cf783dc7d4d2a35732935b0283fd2bfc71d119..279e3402d1f8a75cbf18bae7836f2c3483ee0ee5 100644
 --- content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
 +++ content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
 @@ -4,6 +4,7 @@
@@ -139,44 +373,207 @@ index 60cf783dc7..7d32bb1d6b 100644
  #include <set>
  #include <utility>
  
-@@ -472,6 +473,13 @@ void VideoPictureInPictureWindowControllerImpl::RequestMute(bool mute) {
+@@ -472,6 +473,34 @@ void VideoPictureInPictureWindowControllerImpl::RequestMute(bool mute) {
    active_session_->GetMediaPlayerRemote()->RequestMute(mute);
  }
  
 +void VideoPictureInPictureWindowControllerImpl::SetVolume(double volume) {
++  // Red: set the media element's own volume, so the page's `volume`, its
++  // `volumechange` event and the site's own controls follow the slider.
 +  if (active_session_) {
-+    active_session_->GetMediaPlayerRemote()->SetVolumeMultiplier(
++    active_session_->GetMediaPlayerRemote()->RequestSetVolume(
 +        std::clamp(volume, 0.0, 1.0));
 +  }
++}
++
++std::optional<double> VideoPictureInPictureWindowControllerImpl::GetVolume() {
++  if (!active_session_ || !active_session_->player_id().has_value()) {
++    return std::nullopt;
++  }
++  return static_cast<WebContentsImpl*>(web_contents())
++      ->media_web_contents_observer()
++      ->GetPlayerVolume(active_session_->player_id().value());
++}
++
++void VideoPictureInPictureWindowControllerImpl::MediaVolumeChanged(
++    const MediaPlayerId& id,
++    double volume) {
++  if (!window_ || !active_session_ || active_session_->player_id() != id ||
++      web_contents()->IsBeingDestroyed()) {
++    return;
++  }
++  window_->SetMediaVolume(volume);
 +}
 +
  bool VideoPictureInPictureWindowControllerImpl::GetMuteStatus() {
    return MediaSessionImpl::Get(web_contents())->GetMuteStatus();
  }
 diff --git content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
-index d6fcb466e6..399061bbc5 100644
+index d6fcb466e674e8239a59124780d749aa20e3d78c..1f031834f22077042ca5d2d20093d3f3bc98a137 100644
 --- content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
 +++ content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
-@@ -77,6 +77,7 @@ class CONTENT_EXPORT VideoPictureInPictureWindowControllerImpl
+@@ -5,6 +5,7 @@
+ #ifndef CONTENT_BROWSER_PICTURE_IN_PICTURE_VIDEO_PICTURE_IN_PICTURE_WINDOW_CONTROLLER_IMPL_H_
+ #define CONTENT_BROWSER_PICTURE_IN_PICTURE_VIDEO_PICTURE_IN_PICTURE_WINDOW_CONTROLLER_IMPL_H_
+ 
++#include <optional>
+ #include <set>
+ 
+ #include "components/viz/common/surfaces/parent_local_surface_id_allocator.h"
+@@ -77,7 +78,13 @@ class CONTENT_EXPORT VideoPictureInPictureWindowControllerImpl
    void ToggleCamera() override;
    void HangUp() override;
    void RequestMute(bool mute) override;
 +  void SetVolume(double volume) override;
++  std::optional<double> GetVolume() override;
    bool GetMuteStatus() override;
++
++  // Red: called by MediaWebContentsObserver when a player's own volume
++  // changes; updates the window's volume slider for the active player.
++  void MediaVolumeChanged(const MediaPlayerId& id, double volume);
    void PreviousSlide() override;
    void NextSlide() override;
+   void SeekTo(base::TimeDelta time) override;
+diff --git content/public/browser/overlay_window.h content/public/browser/overlay_window.h
+index ca3a18aed8ce1feb9b463479f68fe85e64c627aa..db3f26e62dab1af3cca0f0b869b93a17051595ed 100644
+--- content/public/browser/overlay_window.h
++++ content/public/browser/overlay_window.h
+@@ -57,6 +57,8 @@ class VideoOverlayWindow {
+   virtual void SetMicrophoneMuted(bool muted) = 0;
+   virtual void SetCameraState(bool turned_on) = 0;
+   virtual void SetMediaMuted(bool muted) = 0;
++  // Red: the playing media element's own volume (0..1) changed.
++  virtual void SetMediaVolume(double volume) {}
+   virtual void SetToggleMicrophoneButtonVisibility(bool is_visible) = 0;
+   virtual void SetToggleCameraButtonVisibility(bool is_visible) = 0;
+   virtual void SetHangUpButtonVisibility(bool is_visible) = 0;
 diff --git content/public/browser/video_picture_in_picture_window_controller.h content/public/browser/video_picture_in_picture_window_controller.h
-index c1568a83da..96e91f35a6 100644
+index c1568a83daa620b1f07bc0c73f375fea69eb3595..2e93fe2c8721e0a49e712631b4893ef508cb8b58 100644
 --- content/public/browser/video_picture_in_picture_window_controller.h
 +++ content/public/browser/video_picture_in_picture_window_controller.h
-@@ -59,6 +59,10 @@ class VideoPictureInPictureWindowController
+@@ -5,6 +5,8 @@
+ #ifndef CONTENT_PUBLIC_BROWSER_VIDEO_PICTURE_IN_PICTURE_WINDOW_CONTROLLER_H_
+ #define CONTENT_PUBLIC_BROWSER_VIDEO_PICTURE_IN_PICTURE_WINDOW_CONTROLLER_H_
+ 
++#include <optional>
++
+ #include "base/functional/callback_forward.h"
+ #include "base/time/time.h"
+ #include "build/build_config.h"
+@@ -59,6 +61,13 @@ class VideoPictureInPictureWindowController
    // Returns the current mute status of the media.
    virtual bool GetMuteStatus() = 0;
  
-+  // Red: sets the playing media's volume (0..1) from the window's slider,
-+  // through the player's own volume multiplier.
++  // Red: sets the playing media element's own volume (0..1) from the
++  // window's slider.
 +  virtual void SetVolume(double volume) {}
++
++  // Red: returns the playing media element's own volume (0..1), if known.
++  virtual std::optional<double> GetVolume() { return std::nullopt; }
 +
    // Called when the user interacts with the "Previous Slide" control.
    virtual void PreviousSlide() = 0;
  
+diff --git media/mojo/mojom/media_player.mojom media/mojo/mojom/media_player.mojom
+index 8dcfa93038d2abd4a6f930b99e8c25ebbca07c75..0639d4d60d1a8e4b2c035d2240be3ad95577ad33 100644
+--- media/mojo/mojom/media_player.mojom
++++ media/mojo/mojom/media_player.mojom
+@@ -35,6 +35,10 @@ interface MediaPlayer {
+   // Requests the media player to mute or unmute.
+   RequestMute(bool mute);
+ 
++  // Red: requests the media player to set its own volume (the media element's
++  // `volume`, 0..1), e.g. from the Picture-in-Picture window.
++  RequestSetVolume(double volume);
++
+   // Set the volume multiplier to control audio ducking.
+   // Output volume should be set to |player_volume| * |multiplier|. The range
+   // of |multiplier| is [0, 1], where 1 indicates normal (non-ducked) playback.
+@@ -95,6 +99,10 @@ interface MediaPlayerObserver {
+   // Notifies that the muted status of the media player has changed.
+   OnMutedStatusChanged(bool muted);
+ 
++  // Red: notifies the media element's own volume (0..1): once when the
++  // player is added and whenever it changes.
++  OnVolumeChanged(double volume);
++
+   // Notifies that the media metadata of the media player has changed, along
+   // with the kind of tracks the media player has, and the type of content.
+   OnMediaMetadataChanged(
+diff --git third_party/blink/renderer/core/html/media/html_media_element.cc third_party/blink/renderer/core/html/media/html_media_element.cc
+index 89585ca9641125689285cc431c57451292344ca6..b8075880a59433ef1898e5eedb9e94c22dabe681 100644
+--- third_party/blink/renderer/core/html/media/html_media_element.cc
++++ third_party/blink/renderer/core/html/media/html_media_element.cc
+@@ -1783,6 +1783,10 @@ void HTMLMediaElement::StartPlayerLoad() {
+   GetMediaPlayerHostRemote().OnMediaPlayerAdded(
+       std::move(media_player_remote), AddMediaPlayerObserverAndPassReceiver(),
+       web_media_player_->GetPlayerId());
++  // Red: report the initial volume to the browser (see OnVolumeChanged).
++  for (auto& observer : media_player_observer_remote_set_->Value()) {
++    observer->OnVolumeChanged(volume_);
++  }
+ 
+   if (GetLayoutObject())
+     GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+@@ -3404,6 +3408,11 @@ void HTMLMediaElement::setVolume(double vol, ExceptionState& exception_state) {
+ 
+   ScheduleNamedEvent(event_type_names::kVolumechange);
+ 
++  // Red: keep the browser (e.g. the Picture-in-Picture volume slider) in sync.
++  for (auto& observer : media_player_observer_remote_set_->Value()) {
++    observer->OnVolumeChanged(volume_);
++  }
++
+   // If it setting volume to audible and AutoplayPolicy doesn't want the
+   // playback to continue, pause the playback.
+   if (EffectiveMediaVolume() && !autoplay_policy_->RequestAutoplayUnmute())
+@@ -5382,6 +5391,12 @@ void HTMLMediaElement::RequestMute(bool mute) {
+   setMuted(mute);
+ }
+ 
++void HTMLMediaElement::RequestSetVolume(double volume) {
++  // Red: the browser sets the element's own volume, as the page would, so that
++  // `volume` and `volumechange` reflect it.
++  setVolume(std::clamp(volume, 0.0, 1.0), ASSERT_NO_EXCEPTION);
++}
++
+ void HTMLMediaElement::SetVolumeMultiplier(double multiplier) {
+   if (web_media_player_)
+     web_media_player_->SetVolumeMultiplier(multiplier);
+diff --git third_party/blink/renderer/core/html/media/html_media_element.h third_party/blink/renderer/core/html/media/html_media_element.h
+index 7483ba1945a65e2e98a74d8c3d0154631a6075d0..e1601dfb14f7883dfc76d3cb4514d10199083388 100644
+--- third_party/blink/renderer/core/html/media/html_media_element.h
++++ third_party/blink/renderer/core/html/media/html_media_element.h
+@@ -673,6 +673,7 @@ class CORE_EXPORT HTMLMediaElement
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override;
++  void RequestSetVolume(double volume) override;
+   void SetVolumeMultiplier(double multiplier) override;
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override;
+diff --git third_party/blink/renderer/core/html/media/html_media_element_test.cc third_party/blink/renderer/core/html/media/html_media_element_test.cc
+index a131365aacc9863426c786650ef62d5e260a2dab..61f9cd8da76408323e04de568df582d778bcedd8 100644
+--- third_party/blink/renderer/core/html/media/html_media_element_test.cc
++++ third_party/blink/renderer/core/html/media/html_media_element_test.cc
+@@ -260,6 +260,8 @@ class TestMediaPlayerObserver final
+     run_loop_->Quit();
+   }
+ 
++  void OnVolumeChanged(double volume) override {}
++
+   void OnMutedStatusChanged(bool muted) override {
+     received_muted_status_type_ = muted;
+     run_loop_->Quit();
+diff --git third_party/blink/renderer/modules/webaudio/audio_context.h third_party/blink/renderer/modules/webaudio/audio_context.h
+index a69708e0be6abfda8acc53c831ee95634a06b01e..66c2523fc9d6d9b2e68e6b9238e426dd14d7c666 100644
+--- third_party/blink/renderer/modules/webaudio/audio_context.h
++++ third_party/blink/renderer/modules/webaudio/audio_context.h
+@@ -192,6 +192,7 @@ class MODULES_EXPORT AudioContext final
+   void RequestEnterPictureInPicture(
+       const std::optional<gfx::Size>& min_size) override {}
+   void RequestMute(bool mute) override {}
++  void RequestSetVolume(double volume) override {}
+   void SetVolumeMultiplier(double multiplier) override;
+   void SetPersistentState(bool persistent) override {}
+   void SetPowerExperimentState(bool enabled) override {}
