@@ -14,6 +14,7 @@
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "chrome/browser/ui/page_action/page_action_icon_type.h"
+#include "extensions/browser/extension_install_prompt_client.h"
 #include "third_party/blink/public/mojom/page/draggable_region.mojom-forward.h"
 #include "third_party/skia/include/core/SkRegion.h"
 #include "ui/base/window_open_disposition.h"
@@ -37,6 +38,10 @@ namespace content {
 struct GlobalRenderFrameHostId;
 class WebContents;
 }  // namespace content
+
+namespace extensions {
+class InstallPromptData;
+}
 
 namespace gfx {
 class Rect;
@@ -199,6 +204,18 @@ class BrowserDelegate {
   // TYPE_POPUP Browser to hide Chrome's controls. Extensions should see it as
   // a normal window; popups opened by web content stay "popup".
   virtual bool IsClientCreatedTab() const { return false; }
+
+  // Red: called from ShowExtensionInstallDialogImpl before Chrome's extension
+  // install dialog is created for |web_contents|. Returns true when the client
+  // shows its own confirmation; |done_callback| and |prompt| are then consumed
+  // and |done_callback| runs exactly once. Returns false (leaving both
+  // untouched) for Chrome's dialog.
+  virtual bool HandleExtensionInstallPrompt(
+      content::WebContents* web_contents,
+      extensions::ExtensionInstallPromptClient::DoneCallback& done_callback,
+      std::unique_ptr<extensions::InstallPromptData>& prompt) {
+    return false;
+  }
 
   // Returns true if this browser has a Views-hosted opener. Only
   // applicable for Browsers of type picture_in_picture and devtools.

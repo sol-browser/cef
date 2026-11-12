@@ -87,6 +87,10 @@ class ChromeBrowserDelegate : public cef::BrowserDelegate {
   void WindowFullscreenStateChanged() override;
   bool IsViewsHosted() const override;
   bool IsClientCreatedTab() const override;
+  bool HandleExtensionInstallPrompt(
+      content::WebContents* web_contents,
+      extensions::ExtensionInstallPromptClient::DoneCallback& done_callback,
+      std::unique_ptr<extensions::InstallPromptData>& prompt) override;
   bool HasViewsHostedOpener() const override;
 
   Browser* browser() const { return browser_; }

@@ -19,6 +19,7 @@
 #include "cef/libcef/browser/thread_util.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/pref_names.h"
+#include "components/download/public/common/download_source.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/download_item_utils.h"
@@ -407,6 +408,15 @@ bool CefDownloadManagerDelegateImpl::DetermineDownloadTarget(
   // from either method.
   CefRefPtr<CefBrowserHostBase> browser = GetOrAssociateBrowser(item);
   if (!browser) {
+    return false;
+  }
+
+  // WebstoreInstaller has already selected a private target for this
+  // browser-initiated install. Chrome's download delegate must keep that
+  // target and apply its normal extension download checks.
+  if (!browser->IsAlloyStyle() &&
+      item->GetDownloadSource() == download::DownloadSource::EXTENSION_INSTALLER &&
+      !item->GetForcedFilePath().empty()) {
     return false;
   }
 

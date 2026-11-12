@@ -40,6 +40,8 @@
 
 #include "include/cef_base.h"
 #include "include/cef_browser.h"
+#include "include/cef_callback.h"
+#include "include/cef_values.h"
 
 ///
 /// Callback interface for asynchronous continuation of file dialog requests.
@@ -104,6 +106,32 @@ class CefDialogHandler : public virtual CefBaseRefCounted {
                             CefRefPtr<CefFileDialogCallback> callback) {
     return false;
   }
+
+#if CEF_API_ADDED(CEF_EXPERIMENTAL)
+  ///
+  /// Called before Chrome shows its confirmation for installing an extension
+  /// from a page in |browser| (for example the Chrome Web Store's "Add to
+  /// Chrome"). |prompt| describes it: "id" and "name" of the extension;
+  /// "title", "heading", "accept" and "cancel" (Chrome's localized dialog
+  /// title, permissions heading and button labels; "heading" may be empty);
+  /// "permissions" (a list of dictionaries with "text" and "details" strings,
+  /// the warnings Chrome would show); "icon" (PNG data as a binary value; may
+  /// be missing); and "delay" (milliseconds the accept action should stay
+  /// disabled after the confirmation becomes visible, as Chrome does against
+  /// accidental clicks). To show a custom confirmation return true and execute
+  /// |callback| Continue() to install or Cancel() to cancel, either inline or
+  /// at a later time; releasing |callback| without executing it cancels. Return
+  /// false to show Chrome's dialog. Only ordinary install prompts are offered:
+  /// prompts that need a parent's approval, an administrator request or a
+  /// choice about withheld permissions always use Chrome's dialog.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual bool OnExtensionInstallPrompt(CefRefPtr<CefBrowser> browser,
+                                        CefRefPtr<CefDictionaryValue> prompt,
+                                        CefRefPtr<CefCallback> callback) {
+    return false;
+  }
+#endif
 };
 
 #endif  // CEF_INCLUDE_CEF_DIALOG_HANDLER_H_

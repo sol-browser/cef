@@ -17,6 +17,7 @@
 #include "cef/libcef/browser/chrome/views/chrome_child_window.h"
 #include "cef/libcef/browser/devtools/devtools_window_runner.h"
 #include "cef/libcef/browser/request_context_impl.h"
+#include "cef/libcef/browser/thread_util.h"
 #include "cef/libcef/browser/views/browser_view_impl.h"
 #include "cef/libcef/browser/views/window_impl.h"
 #include "cef/libcef/common/app_manager.h"
@@ -27,6 +28,14 @@
 #include "chrome/browser/ui/browser_window/public/desktop_browser_window_capabilities.h"
 #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
 #include "content/public/browser/global_routing_id.h"
+#include "base/memory/ref_counted_memory.h"
+#include "base/strings/utf_string_conversions.h"
+#include "extensions/browser/install_prompt_data.h"
+#include "extensions/browser/install_prompt_permissions.h"
+#include "extensions/common/extension.h"
+#include "include/cef_callback.h"
+#include "include/cef_values.h"
+#include "ui/gfx/image/image.h"
 #include "third_party/blink/public/mojom/page/draggable_region.mojom.h"
 
 ChromeBrowserDelegate::ChromeBrowserDelegate(
@@ -606,6 +615,152 @@ ChromeBrowserDelegate::CreateBrowserHostForPopup(
 bool ChromeBrowserDelegate::IsViewsHosted() const {
   return create_params_.browser_view != nullptr ||
          create_params_.popup_with_views_hosted_opener;
+}
+
+namespace {
+
+// Red: the client's answer to an extension install prompt. Runs Chrome's done
+// callback exactly once, on the UI thread; releasing it unanswered cancels.
+class ExtensionInstallPromptCallback : public CefCallback {
+ public:
+  using DoneCallback = extensions::ExtensionInstallPromptClient::DoneCallback;
+  using Result = extensions::ExtensionInstallPromptClient::Result;
+
+  ExtensionInstallPromptCallback(
+      DoneCallback done_callback,
+      std::unique_ptr<extensions::InstallPromptData> prompt)
+      : done_callback_(std::move(done_callback)), prompt_(std::move(prompt)) {}
+
+  ExtensionInstallPromptCallback(const ExtensionInstallPromptCallback&) =
+      delete;
+  ExtensionInstallPromptCallback& operator=(
+      const ExtensionInstallPromptCallback&) = delete;
+
+  ~ExtensionInstallPromptCallback() override {
+    if (!done_callback_) {
+      return;
+    }
+    if (CEF_CURRENTLY_ON_UIT()) {
+      Finish(std::move(done_callback_), std::move(prompt_), false);
+    } else {
+      CEF_POST_TASK(CEF_UIT, base::BindOnce(&Finish, std::move(done_callback_),
+                                            std::move(prompt_), false));
+    }
+  }
+
+  void Continue() override { Answer(true); }
+  void Cancel() override { Answer(false); }
+
+  bool answered() const { return !done_callback_; }
+
+  // Returns the prompt to Chrome when the client did not take it.
+  void Release(DoneCallback& done_callback,
+               std::unique_ptr<extensions::InstallPromptData>& prompt) {
+    done_callback = std::move(done_callback_);
+    prompt = std::move(prompt_);
+  }
+
+ private:
+  void Answer(bool accept) {
+    if (!CEF_CURRENTLY_ON_UIT()) {
+      CEF_POST_TASK(
+          CEF_UIT,
+          base::BindOnce(&ExtensionInstallPromptCallback::Answer, this, accept));
+      return;
+    }
+    if (done_callback_) {
+      Finish(std::move(done_callback_), std::move(prompt_), accept);
+    }
+  }
+
+  static void Finish(DoneCallback done_callback,
+                     std::unique_ptr<extensions::InstallPromptData> prompt,
+                     bool accept) {
+    if (prompt) {
+      if (accept) {
+        prompt->OnDialogAccepted();
+      } else {
+        prompt->OnDialogCanceled();
+      }
+    }
+    std::move(done_callback)
+        .Run(extensions::ExtensionInstallPromptClient::DoneCallbackPayload(
+            accept ? Result::ACCEPTED : Result::USER_CANCELED));
+  }
+
+  DoneCallback done_callback_;
+  std::unique_ptr<extensions::InstallPromptData> prompt_;
+
+  IMPLEMENT_REFCOUNTING(ExtensionInstallPromptCallback);
+};
+
+CefRefPtr<CefDictionaryValue> DescribeInstallPrompt(
+    const extensions::InstallPromptData& prompt) {
+  auto info = CefDictionaryValue::Create();
+  const auto* extension = prompt.extension();
+  info->SetString("id", extension->id());
+  info->SetString("name", extension->name());
+  info->SetString("title", prompt.GetDialogTitle());
+  info->SetString("heading", prompt.GetPermissionCount()
+                                 ? prompt.GetPermissionsHeading()
+                                 : std::u16string());
+  info->SetString("accept", prompt.GetAcceptButtonLabel());
+  info->SetString("cancel", prompt.GetAbortButtonLabel());
+  auto permissions = CefListValue::Create();
+  const auto list = prompt.GetPermissions();
+  for (size_t i = 0; i < list.permissions.size(); ++i) {
+    auto row = CefDictionaryValue::Create();
+    row->SetString("text", list.permissions[i]);
+    row->SetString("details",
+                   i < list.details.size() ? list.details[i] : std::u16string());
+    permissions->SetDictionary(permissions->GetSize(), row);
+  }
+  info->SetList("permissions", permissions);
+  if (!prompt.icon().IsEmpty()) {
+    if (const auto png = prompt.icon().As1xPNGBytes(); png && png->size()) {
+      info->SetBinary("icon", CefBinaryValue::Create(png->data(), png->size()));
+    }
+  }
+  // As Chrome's dialog (ExtensionInstallDialogView, g_install_delay_in_ms).
+  info->SetInt("delay", 500);
+  return info;
+}
+
+}  // namespace
+
+bool ChromeBrowserDelegate::HandleExtensionInstallPrompt(
+    content::WebContents* web_contents,
+    extensions::ExtensionInstallPromptClient::DoneCallback& done_callback,
+    std::unique_ptr<extensions::InstallPromptData>& prompt) {
+  CEF_REQUIRE_UIT();
+  // Only an ordinary install; special prompts keep Chrome's dialog.
+  if (!web_contents || !done_callback || !prompt || !prompt->extension() ||
+      prompt->type() != extensions::InstallPromptData::INSTALL_PROMPT ||
+      prompt->requires_parent_permission() ||
+      prompt->ShouldWithheldPermissionsOnDialogAccept()) {
+    return false;
+  }
+  auto browser = ChromeBrowserHostImpl::GetBrowserForContents(web_contents);
+  if (!browser) {
+    return false;
+  }
+  auto client = browser->GetClient();
+  auto handler = client ? client->GetDialogHandler() : nullptr;
+  if (!handler) {
+    return false;
+  }
+  auto info = DescribeInstallPrompt(*prompt);
+  // ExtensionInstallPrompt::ShowDialog already notified OnDialogOpened().
+  CefRefPtr<ExtensionInstallPromptCallback> callback =
+      new ExtensionInstallPromptCallback(std::move(done_callback),
+                                         std::move(prompt));
+  if (handler->OnExtensionInstallPrompt(browser.get(), info,
+                                        callback.get()) ||
+      callback->answered()) {
+    return true;
+  }
+  callback->Release(done_callback, prompt);
+  return false;
 }
 
 bool ChromeBrowserDelegate::IsClientCreatedTab() const {

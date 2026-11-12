@@ -1,0 +1,39 @@
+diff --git chrome/browser/ui/views/extensions/extension_install_dialog_view.cc chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+index 83ce5b59c1e6b0f11e4c54e2cb6b39835d5989e8..f55d3b21e0cecd5a33053c2c51f6fa4a98a28924 100644
+--- chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
++++ chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+@@ -26,6 +26,7 @@
+ #include "chrome/browser/ui/views/extensions/extension_permissions_view.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "chrome/grit/theme_resources.h"
++#include "cef/libcef/features/features.h"
+ #include "components/constrained_window/constrained_window_views.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/page_navigator.h"
+@@ -60,6 +61,10 @@
+ #include "ui/views/widget/widget_delegate.h"
+ #include "ui/views/window/dialog_delegate.h"
+ 
++#if BUILDFLAG(ENABLE_CEF)
++#include "cef/libcef/browser/chrome/browser_delegate.h"
++#endif
++
+ using content::OpenURLParams;
+ using content::Referrer;
+ using extensions::InstallPromptData;
+@@ -101,6 +106,15 @@ void ShowExtensionInstallDialogImpl(
+     BrowserWebContentsDelegate::From(browser)->ActivateContents(web_contents);
+   }
+ 
++#if BUILDFLAG(ENABLE_CEF)
++  // Red: the CEF client may show its own install confirmation.
++  if (browser && browser->cef_delegate() &&
++      browser->cef_delegate()->HandleExtensionInstallPrompt(
++          web_contents, done_callback, prompt)) {
++    return;
++  }
++#endif
++
+   gfx::NativeWindow parent_window = show_params->GetParentWindow();
+   auto dialog = std::make_unique<ExtensionInstallDialogView>(
+       std::move(show_params), std::move(done_callback), std::move(prompt));
