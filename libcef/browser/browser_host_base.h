@@ -282,6 +282,8 @@ class CefBrowserHostBase : public CefBrowserHost,
   void LoadURLFromInitiator(const CefString& url,
                             const CefString& initiator_url) override;
   bool MediaSessionAction(const CefString& action) override;
+  CefRefPtr<CefBinaryValue> GetNavigationState() override;
+  bool RestoreNavigationState(CefRefPtr<CefBinaryValue> state) override;
   void SetContentTransform(double scale,
                            double dim,
                            int duration_ms) override;

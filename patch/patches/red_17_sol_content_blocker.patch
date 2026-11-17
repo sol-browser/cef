@@ -1,0 +1,154 @@
+diff --git chrome/browser/extensions/component_loader.cc chrome/browser/extensions/component_loader.cc
+index e6feac0..57e6f7d 100644
+--- chrome/browser/extensions/component_loader.cc
++++ chrome/browser/extensions/component_loader.cc
+@@ -8,6 +8,7 @@
+ #include <string>
+ #include <string_view>
+ 
++#include "base/base_paths.h"
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/files/file_util.h"
+@@ -18,6 +19,7 @@
+ #include "base/logging.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/path_service.h"
++#include "base/strings/string_util.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/values.h"
+@@ -229,6 +231,67 @@ bool IsNormalSession() {
+ }
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
++#if BUILDFLAG(IS_WIN)
++// Sol: the built-in content blocker. Sol stages the official uBlock Origin
++// release, with the official public key added to its manifest, in
++// <exe dir>/extensions/ublock (Sol docs/ublock-origin.md). It is as trusted as
++// the engine binaries next to it.
++constexpr char kSolContentBlockerId[] = "fkgkibajhfbepljeaefdnfnegdcjomkh";
++constexpr char kSolDisableContentBlockerSwitch[] =
++    "sol-disable-content-blocker";
++
++// Sol's web profiles: <user data>/Default and <user data>/Profile-<uuid>, named
++// like Sol's BrowsingProfiles. Not Sol's own pages (Shell) and not an
++// off-the-record context.
++bool IsSolWebProfile(const Profile& profile) {
++  base::FilePath user_data;
++  if (profile.IsOffTheRecord() ||
++      !base::PathService::Get(chrome::DIR_USER_DATA, &user_data) ||
++      profile.GetPath().DirName() != user_data) {
++    return false;
++  }
++  const std::string name = profile.GetPath().BaseName().MaybeAsASCII();
++  if (name == "Default") {
++    return true;
++  }
++  constexpr std::string_view kPrefix = "Profile-";
++  if (!name.starts_with(kPrefix) || name.size() != kPrefix.size() + 36) {
++    return false;
++  }
++  const std::string_view id = std::string_view(name).substr(kPrefix.size());
++  for (size_t i = 0; i < id.size(); ++i) {
++    const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
++    if (dash ? id[i] != '-'
++             : !(base::IsAsciiDigit(id[i]) || (id[i] >= 'a' && id[i] <= 'f'))) {
++      return false;
++    }
++  }
++  return true;
++}
++
++std::optional<base::DictValue> LoadSolContentBlockerManifest(
++    const base::FilePath& root_directory) {
++  std::string error;
++  std::optional<base::DictValue> manifest =
++      file_util::LoadManifest(root_directory, &error);
++  if (manifest && TryGenerateId(*manifest) != kSolContentBlockerId) {
++    error = "the manifest key does not give the expected extension ID";
++    manifest.reset();
++  }
++  if (manifest &&
++      !extension_l10n_util::LocalizeExtension(
++          root_directory, &*manifest,
++          extension_l10n_util::GzippedMessagesPermission::kDisallow, &error)) {
++    manifest.reset();
++  }
++  if (!manifest) {
++    LOG(ERROR) << "Sol content blocker not loaded from "
++               << root_directory.AsUTF8Unsafe() << ": " << error;
++  }
++  return manifest;
++}
++#endif  // BUILDFLAG(IS_WIN)
++
+ }  // namespace
+ 
+ ComponentLoader::ComponentExtensionInfo::ComponentExtensionInfo(
+@@ -818,6 +881,9 @@ void ComponentLoader::AddDefaultComponentExtensionsWithBackgroundPages(
+   AddNewTabPageExtension();
+   AddGlicExtension();
+   AddContextualTasksExtension();
++#if BUILDFLAG(IS_WIN)
++  AddSolContentBlocker();
++#endif  // BUILDFLAG(IS_WIN)
+ 
+ // http://crbug.com/41070702
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING) && !BUILDFLAG(IS_CHROMEOS)
+@@ -844,6 +910,36 @@ void ComponentLoader::
+ #endif  // BUILDFLAG(ENABLE_HANGOUT_SERVICES_EXTENSION)
+ }
+ 
++#if BUILDFLAG(IS_WIN)
++void ComponentLoader::AddSolContentBlocker() {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          kSolDisableContentBlockerSwitch) ||
++      !IsSolWebProfile(*profile_)) {
++    return;
++  }
++  base::FilePath root_directory;
++  if (!base::PathService::Get(base::DIR_EXE, &root_directory)) {
++    return;
++  }
++  root_directory = root_directory.Append(FILE_PATH_LITERAL("extensions"))
++                       .Append(FILE_PATH_LITERAL("ublock"));
++  // Read off the UI thread, like the other component directories.
++  GetExtensionFileTaskRunner()->PostTaskAndReplyWithResult(
++      FROM_HERE,
++      base::BindOnce(&LoadSolContentBlockerManifest, root_directory),
++      base::BindOnce(&ComponentLoader::FinishAddSolContentBlocker,
++                     weak_factory_.GetWeakPtr(), root_directory));
++}
++
++void ComponentLoader::FinishAddSolContentBlocker(
++    const base::FilePath& root_directory,
++    std::optional<base::DictValue> manifest) {
++  if (manifest && !Exists(kSolContentBlockerId)) {
++    Add(std::move(*manifest), root_directory, /*skip_allowlist=*/true);
++  }
++}
++#endif  // BUILDFLAG(IS_WIN)
++
+ void ComponentLoader::UnloadComponent(ComponentExtensionInfo* component) {
+   if (extension_system_->is_ready()) {
+     auto* registrar = ExtensionRegistrar::Get(profile_);
+diff --git chrome/browser/extensions/component_loader.h chrome/browser/extensions/component_loader.h
+index 448883b..a43338b 100644
+--- chrome/browser/extensions/component_loader.h
++++ chrome/browser/extensions/component_loader.h
+@@ -243,6 +243,14 @@ class ComponentLoader : public KeyedService {
+ 
+   void AddContextualTasksExtension();
+ 
++#if BUILDFLAG(IS_WIN)
++  // Sol: registers the built-in content blocker (uBlock Origin, staged next to
++  // the executable) in Sol's web profiles.
++  void AddSolContentBlocker();
++  void FinishAddSolContentBlocker(const base::FilePath& root_directory,
++                                  std::optional<base::DictValue> manifest);
++#endif  // BUILDFLAG(IS_WIN)
++
+   void AddWithNameAndDescription(int manifest_resource_id,
+                                  const base::FilePath& root_directory,
+                                  const std::string& name_string,

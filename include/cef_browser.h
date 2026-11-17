@@ -1131,6 +1131,30 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
   ///
   /*--cef(added=experimental)--*/
   virtual void SetContentContainerCornerRadius(int radius) = 0;
+
+  ///
+  /// Returns this browser's session history as an opaque value: every back and
+  /// forward entry with its page state (scroll position, form contents),
+  /// encoded as Chrome's session restore stores it. For hosts that close an
+  /// idle browser to free memory and later restore it with
+  /// RestoreNavigationState() in a new browser. Returns nullptr if nothing has
+  /// committed yet. The value may be stored, but only this engine version is
+  /// guaranteed to read it. This method can only be called on the UI thread.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual CefRefPtr<CefBinaryValue> GetNavigationState() = 0;
+
+  ///
+  /// Restores session history saved by GetNavigationState() into this browser
+  /// and loads its current entry, as Chrome restores a discarded tab: back and
+  /// forward work, and the page gets its saved scroll position and form
+  /// contents back where the site allows it. Only for a browser that has not
+  /// navigated yet (created with an empty URL). Returns false, and changes
+  /// nothing, for such a browser that has navigated or for a value this engine
+  /// cannot read. This method can only be called on the UI thread.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual bool RestoreNavigationState(CefRefPtr<CefBinaryValue> state) = 0;
 #endif
 
   ///

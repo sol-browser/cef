@@ -206,8 +206,6 @@ CefBrowserContentsDelegate::CefBrowserContentsDelegate(
     scoped_refptr<CefBrowserInfo> browser_info)
     : browser_info_(browser_info) {}
 
-CefBrowserContentsDelegate::~CefBrowserContentsDelegate() = default;
-
 void CefBrowserContentsDelegate::ObserveWebContents(
     content::WebContents* new_contents) {
   find_observation_.Reset();

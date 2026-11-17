@@ -42,6 +42,10 @@
 #include "services/network/public/mojom/referrer_policy.mojom-shared.h"
 #include "url/origin.h"
 #include "components/sessions/content/session_tab_helper.h"
+#include "base/pickle.h"
+#include "components/sessions/content/content_serialized_navigation_builder.h"
+#include "components/sessions/core/serialized_navigation_entry.h"
+#include "content/public/browser/restore_type.h"
 #include "extensions/browser/extension_action.h"
 #include "extensions/browser/extension_action_manager.h"
 #include "extensions/browser/extension_registry.h"
@@ -1818,6 +1822,97 @@ void CefBrowserHostBase::LoadURLFromInitiator(const CefString& url,
   params.has_user_gesture = true;
   web_contents->GetController().LoadURLWithParams(params);
   OnSetFocus(FOCUS_SOURCE_NAVIGATION);
+}
+
+namespace {
+
+// GetNavigationState() layout: version, current index, entry count, then each
+// entry as sessions::SerializedNavigationEntry::WriteToPickle writes it.
+constexpr int kNavigationStateVersion = 1;
+// NavigationControllerImpl keeps at most 50 entries.
+constexpr int kMaxNavigationStateEntries = 64;
+// Per entry, as WriteToPickle's budget; larger page state is dropped from
+// that entry (its URL and title remain).
+constexpr int kMaxNavigationStateEntrySize = 2 * 1024 * 1024;
+constexpr size_t kMaxNavigationStateSize =
+    kMaxNavigationStateEntries * size_t{kMaxNavigationStateEntrySize};
+
+}  // namespace
+
+CefRefPtr<CefBinaryValue> CefBrowserHostBase::GetNavigationState() {
+  if (!CEF_CURRENTLY_ON_UIT()) {
+    DCHECK(false) << "called on invalid thread";
+    return nullptr;
+  }
+  auto web_contents = GetWebContents();
+  if (!web_contents) {
+    return nullptr;
+  }
+  auto& controller = web_contents->GetController();
+  const int count = controller.GetEntryCount();
+  const int current = controller.GetLastCommittedEntryIndex();
+  auto* committed = controller.GetLastCommittedEntry();
+  if (count <= 0 || count > kMaxNavigationStateEntries || current < 0 ||
+      current >= count || !committed || committed->IsInitialEntry()) {
+    return nullptr;
+  }
+  base::Pickle pickle;
+  pickle.WriteInt(kNavigationStateVersion);
+  pickle.WriteInt(current);
+  pickle.WriteInt(count);
+  for (int i = 0; i < count; ++i) {
+    sessions::ContentSerializedNavigationBuilder::FromNavigationEntry(
+        i, controller.GetEntryAtIndex(i))
+        .WriteToPickle(kMaxNavigationStateEntrySize, &pickle);
+  }
+  return CefBinaryValue::Create(pickle.data(), pickle.size());
+}
+
+bool CefBrowserHostBase::RestoreNavigationState(
+    CefRefPtr<CefBinaryValue> state) {
+  if (!CEF_CURRENTLY_ON_UIT()) {
+    DCHECK(false) << "called on invalid thread";
+    return false;
+  }
+  auto web_contents = GetWebContents();
+  if (!web_contents || !state || state->GetSize() == 0 ||
+      state->GetSize() > kMaxNavigationStateSize) {
+    return false;
+  }
+  auto& controller = web_contents->GetController();
+  auto* committed = controller.GetLastCommittedEntry();
+  if (controller.GetPendingEntry() || controller.GetEntryCount() > 1 ||
+      (committed && !committed->IsInitialEntry())) {
+    return false;
+  }
+  std::vector<uint8_t> bytes(state->GetSize());
+  if (state->GetData(bytes.data(), bytes.size(), 0) != bytes.size()) {
+    return false;
+  }
+  const base::Pickle pickle = base::Pickle::WithUnownedBuffer(bytes);
+  base::PickleIterator iterator(pickle);
+  int version = 0;
+  int current = -1;
+  int count = 0;
+  if (!iterator.ReadInt(&version) || version != kNavigationStateVersion ||
+      !iterator.ReadInt(&current) || !iterator.ReadInt(&count) || count <= 0 ||
+      count > kMaxNavigationStateEntries || current < 0 || current >= count) {
+    return false;
+  }
+  std::vector<sessions::SerializedNavigationEntry> navigations(count);
+  for (auto& navigation : navigations) {
+    if (!navigation.ReadFromPickle(&iterator)) {
+      return false;
+    }
+  }
+  auto entries = sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(
+      navigations, web_contents->GetBrowserContext());
+  if (entries.size() != navigations.size()) {
+    return false;
+  }
+  controller.Restore(current, content::RestoreType::kRestored, &entries);
+  controller.LoadIfNecessary();
+  return true;
 }
 
 bool CefBrowserHostBase::Navigate(const content::OpenURLParams& params) {
