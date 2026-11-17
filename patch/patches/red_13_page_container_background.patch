@@ -19,7 +19,7 @@ index 0dc0d4b..230f2d2 100644
    bool background_visible_ = true;
 +  bool update_renderer_background_ = true;
    bool is_animating_bounds_ = false;
-   bool use_default_deadline_when_animating_ = false;
+   const bool use_default_deadline_when_animating_;
  
 diff --git chrome/browser/ui/views/frame/contents_web_view.cc chrome/browser/ui/views/frame/contents_web_view.cc
 index eb77629..972dbfd 100644
