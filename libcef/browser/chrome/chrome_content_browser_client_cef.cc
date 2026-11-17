@@ -535,13 +535,23 @@ void ChromeContentBrowserClientCef::WillCreateURLLoaderFactory(
             .InitWithNewPipeAndPassReceiver();
   }
 
+  // Red: a frameless CefURLRequest (URLLoaderFactoryGetter::Create without a
+  // frame) is a request of the browser itself. Chrome makes those through its
+  // unproxied browser-process factory, and extensions never see them: keep
+  // Chrome's proxies (extensions' webRequest, which DCHECKs on such requests)
+  // out of it. CEF's own interception above still applies.
+  const bool browser_request =
+      !frame && render_process_id == -1 &&
+      type == URLLoaderFactoryType::kDocumentSubResource;
   // TODO(chrome): Is it necessary to proxy |header_client| callbacks?
-  ChromeContentBrowserClient::WillCreateURLLoaderFactory(
-      browser_context, frame, render_process_id, type, request_initiator,
-      isolation_info, navigation_id, ukm_source_id, factory_builder,
-      /*header_client=*/nullptr, bypass_redirect_checks, disable_secure_dns,
-      handler_override, navigation_response_task_runner,
-      is_for_network_service);
+  if (!browser_request) {
+    ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+        browser_context, frame, render_process_id, type, request_initiator,
+        isolation_info, navigation_id, ukm_source_id, factory_builder,
+        /*header_client=*/nullptr, bypass_redirect_checks, disable_secure_dns,
+        handler_override, navigation_response_task_runner,
+        is_for_network_service);
+  }
 
   DCHECK(intercepting_factory->overriding_factory);
   DCHECK(intercepting_factory->overridden_factory_receiver);

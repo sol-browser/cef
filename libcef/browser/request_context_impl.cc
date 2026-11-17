@@ -31,6 +31,10 @@
 #include "services/network/public/cpp/resolve_host_client_base.h"
 #include "services/network/public/mojom/clear_data_filter.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "chrome/browser/extensions/extension_util.h"
+#include "extensions/browser/extension_registry.h"
+#include "extensions/browser/extension_util.h"
+#include "extensions/common/manifest.h"
 
 using content::BrowserThread;
 
@@ -1094,4 +1098,50 @@ void CefRequestContextImpl::InitializeMediaRouterInternal(
 
 CefBrowserContext* CefRequestContextImpl::browser_context() const {
   return browser_context_;
+}
+
+// Red: Chrome's "Allow in Incognito" for an installed extension, for hosts
+// that show extensions in their own UI.
+namespace {
+const extensions::Extension* IncognitoCandidate(Profile* profile,
+                                                const std::string& id) {
+  if (!profile) {
+    return nullptr;
+  }
+  const auto* extension =
+      extensions::ExtensionRegistry::Get(profile->GetOriginalProfile())
+          ->GetInstalledExtension(id);
+  if (!extension ||
+      extensions::Manifest::IsComponentLocation(extension->location()) ||
+      !extensions::util::CanBeIncognitoEnabled(extension)) {
+    return nullptr;
+  }
+  return extension;
+}
+}  // namespace
+
+bool CefRequestContextImpl::IsExtensionAllowedInIncognito(
+    const CefString& extension_id) {
+  if (!VerifyBrowserContext()) {
+    return false;
+  }
+  auto* profile = browser_context()->AsProfile();
+  return IncognitoCandidate(profile, extension_id.ToString()) &&
+         extensions::util::IsIncognitoEnabled(extension_id.ToString(),
+                                              profile->GetOriginalProfile());
+}
+
+bool CefRequestContextImpl::SetExtensionAllowedInIncognito(
+    const CefString& extension_id,
+    bool allowed) {
+  if (!VerifyBrowserContext()) {
+    return false;
+  }
+  auto* profile = browser_context()->AsProfile();
+  if (!IncognitoCandidate(profile, extension_id.ToString())) {
+    return false;
+  }
+  extensions::util::SetIsIncognitoEnabled(
+      extension_id.ToString(), profile->GetOriginalProfile(), allowed);
+  return true;
 }

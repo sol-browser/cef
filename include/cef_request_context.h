@@ -365,6 +365,28 @@ class CefRequestContext : public CefPreferenceManager {
   ///
   /*--cef(default_retval=CEF_COLOR_VARIANT_SYSTEM)--*/
   virtual cef_color_variant_t GetChromeColorSchemeVariant() = 0;
+
+#if CEF_API_ADDED(CEF_EXPERIMENTAL)
+  ///
+  /// Returns true if the installed extension |extension_id| may run in the
+  /// off-the-record contexts of this context's profile (Chrome's "Allow in
+  /// Incognito"). Must be called on the browser process UI thread.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual bool IsExtensionAllowedInIncognito(const CefString& extension_id) = 0;
+
+  ///
+  /// Allows or disallows the installed extension |extension_id| in the
+  /// off-the-record contexts of this context's profile, as Chrome's "Allow in
+  /// Incognito" switch does (the extension reloads). Returns false, changing
+  /// nothing, if the profile has no such extension or it cannot be allowed
+  /// (component extensions, policy). Must be called on the browser process UI
+  /// thread.
+  ///
+  /*--cef(added=experimental)--*/
+  virtual bool SetExtensionAllowedInIncognito(const CefString& extension_id,
+                                              bool allowed) = 0;
+#endif
 };
 
 #endif  // CEF_INCLUDE_CEF_REQUEST_CONTEXT_H_

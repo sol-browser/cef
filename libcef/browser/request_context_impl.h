@@ -147,6 +147,9 @@ class CefRequestContextImpl : public CefRequestContext {
   cef_color_variant_t GetChromeColorSchemeMode() override;
   cef_color_t GetChromeColorSchemeColor() override;
   cef_color_variant_t GetChromeColorSchemeVariant() override;
+  bool IsExtensionAllowedInIncognito(const CefString& extension_id) override;
+  bool SetExtensionAllowedInIncognito(const CefString& extension_id,
+                                      bool allowed) override;
 
   const CefRequestContextSettings& settings() const { return config_.settings; }
 
