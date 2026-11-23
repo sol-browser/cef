@@ -1,0 +1,32 @@
+diff --git chrome/browser/shell_integration_win.cc chrome/browser/shell_integration_win.cc
+index c46f6ea2d6d..56c79fd9721 100644
+--- chrome/browser/shell_integration_win.cc
++++ chrome/browser/shell_integration_win.cc
+@@ -46,6 +46,7 @@
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/shlwapi.h"
+ #include "base/win/shortcut.h"
++#include "cef/libcef/features/features.h"
+ #include "chrome/browser/policy/policy_path_parser.h"
+ #include "chrome/browser/shell_integration.h"
+ #include "chrome/browser/shortcuts/platform_util_win.h"
+@@ -837,11 +838,19 @@ namespace internal {
+ 
+ DefaultWebClientSetPermission GetPlatformSpecificDefaultWebClientSetPermission(
+     WebClientSetMethod method) {
++#if BUILDFLAG(ENABLE_CEF)
++  // Sol registers itself with Windows. Chromium's own shell integration would
++  // add a "Chromium" entry (ProgIDs, Default Apps, chromium: protocol) and
++  // open Windows Settings whenever a site becomes a scheme handler. Site
++  // handlers keep working inside the browser.
++  return SET_DEFAULT_NOT_ALLOWED;
++#else
+   if (!install_static::SupportsSetAsDefaultBrowser()) {
+     return SET_DEFAULT_NOT_ALLOWED;
+   }
+   // Setting the default web client generally requires user interaction.
+   return SET_DEFAULT_INTERACTIVE;
++#endif
+ }
+ 
+ }  // namespace internal
