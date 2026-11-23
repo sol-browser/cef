@@ -36,6 +36,7 @@
 #include "chrome/common/chrome_switches.h"
 #include "components/performance_manager/embedder/performance_manager_registry.h"
 #include "content/public/browser/client_certificate_delegate.h"
+#include "content/public/browser/global_request_id.h"
 #include "content/public/browser/navigation_throttle.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
@@ -706,9 +707,15 @@ ChromeContentBrowserClientCef::CreateLoginDelegate(
     bool do_not_prompt_for_login,
     content::GuestPageHolder* guest,
     content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
-  // |web_contents| is nullptr for CefURLRequests without an associated frame.
-  if (!web_contents || base::CommandLine::ForCurrentProcess()->HasSwitch(
-                           switches::kDisableChromeLoginPrompt)) {
+  // Service and shared workers can also make requests without WebContents.
+  // Let Chromium dispatch their proxy challenges to WebRequest extensions.
+  // Browser-originated CefURLRequests keep the CEF authentication callback.
+  const bool worker_proxy_auth =
+      !web_contents && browser_context && auth_info.is_proxy &&
+      request_id.child_id && !request_id.child_id.is_browser();
+  if ((!web_contents && !worker_proxy_auth) ||
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kDisableChromeLoginPrompt)) {
     // Delegate auth callbacks to GetAuthCredentials.
     return std::make_unique<net_service::LoginDelegate>(
         auth_info, web_contents, request_id, url,
@@ -718,7 +725,8 @@ ChromeContentBrowserClientCef::CreateLoginDelegate(
   return ChromeContentBrowserClient::CreateLoginDelegate(
       auth_info, web_contents, browser_context, request_id,
       is_request_for_primary_main_frame_navigation, is_request_for_navigation,
-      url, response_headers, first_auth_attempt, do_not_prompt_for_login, guest,
+      url, response_headers, first_auth_attempt,
+      do_not_prompt_for_login || worker_proxy_auth, guest,
       std::move(auth_required_callback));
 }
 
