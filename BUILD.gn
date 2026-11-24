@@ -1980,6 +1980,13 @@ if (is_mac) {
     # Necessary because the libcef_test_support target is testonly.
     testonly = true
 
+    # Red: link-time optimization at Chrome's level. The default ThinLTO config
+    # links at /opt:lldlto=0, leaving Blink's cross-file inlining and PGO
+    # decisions undone (DOM/style/layout ~20% slower than chrome.dll, which
+    # chrome/BUILD.gn moves to thinlto_optimize_max the same way).
+    configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
+    configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+
     sources = libcef_sources_common
 
     deps = libcef_deps_common

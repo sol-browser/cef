@@ -50,6 +50,8 @@ class ChromeBrowserView
   void OnGestureEvent(ui::GestureEvent* event) override;
 
   // BrowserView methods:
+  using ParentClass::SetBounds;
+  void SetBounds(const gfx::Rect& bounds) override;
   bool HandleKeyboardEvent(const input::NativeWebKeyboardEvent& event) override;
   ToolbarView* OverrideCreateToolbar() override;
   void WillDestroyToolbar() override;

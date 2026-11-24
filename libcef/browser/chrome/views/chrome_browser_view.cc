@@ -6,6 +6,7 @@
 
 #include "cef/libcef/browser/chrome/views/chrome_browser_widget.h"
 #include "cef/libcef/browser/views/browser_view_impl.h"
+#include "cef/libcef/common/api_version_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 
 ChromeBrowserView::ChromeBrowserView(CefBrowserViewImpl* cef_browser_view)
@@ -17,6 +18,28 @@ ChromeBrowserView::~ChromeBrowserView() {
     WillDestroyToolbar();
     cef_toolbar_ = nullptr;
   }
+}
+
+// Red: BrowserWindow::SetBounds (an extension's chrome.windows.update with
+// bounds, for example) would move this view's own widget, which for a browser
+// embedded in a client window is a child window inside the client's layout.
+// Ask the client first, with the same meaning as for window.resizeTo/moveTo
+// (CefDisplayHandler::OnContentsBoundsChange); keep Chrome's behavior otherwise.
+void ChromeBrowserView::SetBounds(const gfx::Rect& bounds) {
+  if (!destroyed_ && CEF_API_IS_ADDED(13700)) {
+    if (auto browser = cef_browser_view_->GetBrowser()) {
+      if (auto client = browser->GetHost()->GetClient()) {
+        if (auto handler = client->GetDisplayHandler()) {
+          if (handler->OnContentsBoundsChange(
+                  browser, {bounds.x(), bounds.y(), bounds.width(),
+                            bounds.height()})) {
+            return;
+          }
+        }
+      }
+    }
+  }
+  BrowserView::SetBounds(bounds);
 }
 
 bool ChromeBrowserView::HandleKeyboardEvent(
