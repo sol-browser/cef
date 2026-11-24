@@ -1246,6 +1246,15 @@ if (is_mac) {
   }
 }
 
+# Red: libcef's ThinLTO backends at thinlto_optimize_max ran out of memory on a
+# 32 GB PC with Chromium's /opt:lldltojobs=all (one per thread). Applied after
+# //build/config/compiler, so this later value wins.
+config("libcef_lto_jobs_config") {
+  if (is_win && use_thin_lto && !is_debug) {
+    ldflags = [ "/opt:lldltojobs=4" ]
+  }
+}
+
 # Configuration that will be applied to all targets that build autogen files.
 config("libcef_autogen_config") {
   if (is_clang) {
@@ -1985,7 +1994,10 @@ if (is_mac) {
     # decisions undone (DOM/style/layout ~20% slower than chrome.dll, which
     # chrome/BUILD.gn moves to thinlto_optimize_max the same way).
     configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
-    configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+    configs += [
+      "//build/config/compiler:thinlto_optimize_max",
+      ":libcef_lto_jobs_config",
+    ]
 
     sources = libcef_sources_common
 
